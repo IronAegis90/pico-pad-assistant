@@ -11,17 +11,31 @@ import wifi
 from pmk import PMK
 from pmk.platform.rgbkeypadbase import RGBKeypadBase as Hardware
 
-mqttConfig = config.MQTT()
+wifi_config = config.Wifi()
+mqtt_config = config.MQTT()
+home_assistant_config = config.HomeAssistant()
 
 pmk = PMK(Hardware())
 
 keys = pmk.keys
 
-def mqtt_on_connect(client, userdata, flags, rc):
-    auto_discovery = homeassistant.AutoDiscovery()
+buttons = {}
+lights = {}
 
+for key in keys:
+    buttons[key.number] = homeassistant.MqttButton(key, home_assistant_config)
+    lights[key.number] = homeassistant.MqttLight(key, home_assistant_config)
+
+def mqtt_on_connect(client, userdata, flags, rc):
     for key in keys:
-        client.publish(auto_discovery.topic(homeassistant.Domains().BUTTON, key), auto_discovery.message(homeassistant.Domains().BUTTON, key))
+        button = buttons[key.number]
+        light = lights[key.number]
+
+        client.publish(button.auto_discovery.topic, button.auto_discovery.message)
+        client.publish(light.auto_discovery.topic, light.auto_discovery.message)
+       
+        client.subscribe(light.command_topic)
+        client.subscribe(light.rgb_command_topic)
 
 def mqtt_on_message(client, topic, message):
     print(f"New message on topic {topic}: {message}")
@@ -29,37 +43,48 @@ def mqtt_on_message(client, topic, message):
 for key in keys:
     @pmk.on_press(key)
     def pmk_on_press(key):
-        print("Key {} pressed".format(key.number))
-        key.set_led(0, 0, 255)
+        button = buttons[key.number]
+
+        mqtt_client.publish(
+            button.state_topic, 
+            json.dumps({
+                "event_type": "press"
+            }))
+
 
     @pmk.on_release(key)
     def pmk_on_release(key):
-        print("Key {} released".format(key.number))
-        if key.rgb == [255, 0, 0]:
-            key.set_led(0, 255, 0)
-        else:
-            key.set_led(64, 64, 64)
+        button = buttons[key.number]
+
+        mqtt_client.publish(
+            button.state_topic, 
+            json.dumps({
+                "event_type": "release"
+            }))
 
     @pmk.on_hold(key)
     def pmk_on_hold(key):
-        print("Key {} held".format(key.number))
-        key.set_led(255, 0, 0)
+        button = buttons[key.number]
 
-wifi.radio.connect(os.getenv('WIFI_SSID'), os.getenv('WIFI_PASSWORD'))
+        mqtt_client.publish(
+            button.state_topic, 
+            json.dumps({
+                "event_type": "hold"
+            }))
+
+wifi.radio.connect(wifi_config.ssid, wifi_config.password)
 
 socket_pool = socketpool.SocketPool(wifi.radio)
 ssl_context = ssl.create_default_context()
 
 mqtt_client = MQTT.MQTT(
-    broker = mqttConfig.broker(),
-    port = mqttConfig.port(),
-    username = mqttConfig.username(),
-    password = mqttConfig.password(),
+    broker = mqtt_config.broker,
+    port = mqtt_config.port,
+    username = mqtt_config.username,
+    password = mqtt_config.password,
     socket_pool = socket_pool,
     ssl_context = ssl_context
 )
-
-mqtt_client.enable_logger(logging, logging.DEBUG)
 
 mqtt_client.on_connect = mqtt_on_connect
 mqtt_client.on_message = mqtt_on_message
@@ -67,4 +92,5 @@ mqtt_client.on_message = mqtt_on_message
 mqtt_client.connect()
 
 while True:
+    #mqtt_client.loop(timeout=1)
     pmk.update()
